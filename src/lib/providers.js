@@ -16,11 +16,11 @@ export const PROVIDERS = {
     keyHint: 'sk-...',
     docsUrl: 'https://platform.openai.com/api-keys',
     models: [
-      { id: 'gpt-5.5', label: 'GPT-5.5' },
-      { id: 'gpt-5.4', label: 'GPT-5.4' },
-      { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini' },
-      { id: 'gpt-4.1', label: 'GPT-4.1' },
-      { id: 'gpt-4o', label: 'GPT-4o' },
+      { id: 'gpt-5.5', label: 'GPT-5.5', maxOutput: 64000 },
+      { id: 'gpt-5.4', label: 'GPT-5.4', maxOutput: 64000 },
+      { id: 'gpt-5.4-mini', label: 'GPT-5.4 mini', maxOutput: 64000 },
+      { id: 'gpt-4.1', label: 'GPT-4.1', maxOutput: 32768 },
+      { id: 'gpt-4o', label: 'GPT-4o', maxOutput: 16384 },
     ],
   },
   anthropic: {
@@ -30,10 +30,10 @@ export const PROVIDERS = {
     keyHint: 'sk-ant-...',
     docsUrl: 'https://console.anthropic.com/settings/keys',
     models: [
-      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
-      { id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
+      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', maxOutput: 64000 },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', maxOutput: 64000 },
+      { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', maxOutput: 32000 },
+      { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', maxOutput: 64000 },
     ],
   },
   gemini: {
@@ -43,9 +43,9 @@ export const PROVIDERS = {
     keyHint: 'AIza...',
     docsUrl: 'https://aistudio.google.com/app/apikey',
     models: [
-      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-      { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite' },
+      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', maxOutput: 65536 },
+      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', maxOutput: 65536 },
+      { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite', maxOutput: 65536 },
     ],
   },
 };
@@ -60,6 +60,18 @@ export function providerForModel(modelId) {
   return null;
 }
 
+/** Fallback output cap when a model has no explicit maxOutput. */
+export const DEFAULT_MAX_TOKENS = 16384;
+
+/** Resolve the output-token budget for a given model id. */
+export function maxTokensForModel(modelId) {
+  for (const p of PROVIDER_LIST) {
+    const m = p.models.find((x) => x.id === modelId);
+    if (m) return m.maxOutput || DEFAULT_MAX_TOKENS;
+  }
+  return DEFAULT_MAX_TOKENS;
+}
+
 /** Default selection used on first load. */
 export const DEFAULT_PROVIDER = 'anthropic';
 export const DEFAULT_MODEL = 'claude-sonnet-4-6';
@@ -67,8 +79,29 @@ export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 /* ------------------------------------------------------------------ */
 /* Request builders (per vendor)                                       */
 /* ------------------------------------------------------------------ */
+/*
+ * A normalized message may carry images:
+ *   { role, content: string, images?: Array<{ mimeType: string, data: string }> }
+ * where `data` is raw base64 (no data-URL prefix). Each builder maps that
+ * into the vendor's multimodal content shape.
+ */
+
+function hasImages(m) {
+  return Array.isArray(m.images) && m.images.length > 0;
+}
 
 function buildOpenAIRequest({ apiKey, model, system, messages, maxTokens }) {
+  const toContent = (m) =>
+    hasImages(m)
+      ? [
+          { type: 'text', text: m.content || '' },
+          ...m.images.map((im) => ({
+            type: 'image_url',
+            image_url: { url: `data:${im.mimeType};base64,${im.data}` },
+          })),
+        ]
+      : m.content;
+
   return {
     url: 'https://api.openai.com/v1/chat/completions',
     init: {
@@ -82,7 +115,7 @@ function buildOpenAIRequest({ apiKey, model, system, messages, maxTokens }) {
         max_tokens: maxTokens,
         messages: [
           { role: 'system', content: system },
-          ...messages.map((m) => ({ role: m.role, content: m.content })),
+          ...messages.map((m) => ({ role: m.role, content: toContent(m) })),
         ],
       }),
     },
@@ -91,6 +124,17 @@ function buildOpenAIRequest({ apiKey, model, system, messages, maxTokens }) {
 }
 
 function buildAnthropicRequest({ apiKey, model, system, messages, maxTokens }) {
+  const toContent = (m) =>
+    hasImages(m)
+      ? [
+          ...m.images.map((im) => ({
+            type: 'image',
+            source: { type: 'base64', media_type: im.mimeType, data: im.data },
+          })),
+          { type: 'text', text: m.content || '' },
+        ]
+      : m.content;
+
   return {
     url: 'https://api.anthropic.com/v1/messages',
     init: {
@@ -106,7 +150,7 @@ function buildAnthropicRequest({ apiKey, model, system, messages, maxTokens }) {
         model,
         max_tokens: maxTokens,
         system,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: messages.map((m) => ({ role: m.role, content: toContent(m) })),
       }),
     },
     extract: (data) =>
@@ -120,7 +164,14 @@ function buildGeminiRequest({ apiKey, model, system, messages, maxTokens }) {
   // Gemini uses "user"/"model" roles and a separate systemInstruction field.
   const contents = messages.map((m) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
+    parts: [
+      { text: m.content || '' },
+      ...(hasImages(m)
+        ? m.images.map((im) => ({
+            inlineData: { mimeType: im.mimeType, data: im.data },
+          }))
+        : []),
+    ],
   }));
   return {
     url: `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
@@ -172,7 +223,7 @@ export async function callModel({
   apiKey,
   system,
   messages,
-  maxTokens = 8192,
+  maxTokens = DEFAULT_MAX_TOKENS,
   signal,
 }) {
   if (!apiKey) {

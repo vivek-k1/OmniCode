@@ -17,6 +17,8 @@ import {
   Trash2,
   Bot,
   User,
+  ImagePlus,
+  X,
 } from 'lucide-react';
 import { useWorkspace, getApiKey } from '../context/WorkspaceContext.jsx';
 import {
@@ -24,9 +26,34 @@ import {
   PROVIDERS,
   providerForModel,
   callModel,
+  maxTokensForModel,
 } from '../lib/providers.js';
 import { buildSystemPrompt } from '../lib/systemPrompt.js';
 import { stripFileBlocks } from '../lib/parser.js';
+import { flattenFiles } from '../lib/fileTree.js';
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB per image
+const MAX_ATTACHMENTS = 5;
+
+/** Read an image File into { id, name, mimeType, data(base64), url }. */
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = reader.result; // data:<mime>;base64,<data>
+      const comma = String(url).indexOf(',');
+      resolve({
+        id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: file.name || 'pasted-image',
+        mimeType: file.type || 'image/png',
+        data: String(url).slice(comma + 1),
+        url,
+      });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 /* ----------------------- Model selector dropdown ------------------- */
 
@@ -141,6 +168,19 @@ function Message({ msg, onOpenFile }) {
           )}
         </div>
 
+        {msg.images && msg.images.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {msg.images.map((im) => (
+              <img
+                key={im.id}
+                src={im.url || `data:${im.mimeType};base64,${im.data}`}
+                alt={im.name}
+                className="h-20 w-20 object-cover rounded-md border border-line"
+              />
+            ))}
+          </div>
+        )}
+
         {msg.error ? (
           <div className="flex items-start gap-2 rounded-md border border-rose-500/20 bg-rose-500/[0.06] px-3 py-2 text-xs text-rose-200">
             <CircleAlert size={14} className="shrink-0 mt-0.5" />
@@ -186,12 +226,47 @@ const WELCOME = {
 
 export default function AgentPanel() {
   const ws = useWorkspace();
-  const { model, filePaths, applyAgentOutput, openFile } = ws;
+  const { model, tree, applyAgentOutput, openFile } = ws;
   const [messages, setMessages] = useState([WELCOME]);
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState([]);
   const [busy, setBusy] = useState(false);
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const addImageFiles = async (fileList) => {
+    const files = Array.from(fileList || []).filter((f) =>
+      f.type.startsWith('image/')
+    );
+    if (!files.length) return;
+    const next = [];
+    for (const f of files) {
+      if (f.size > MAX_IMAGE_BYTES) {
+        window.alert(`"${f.name}" is larger than 5 MB and was skipped.`);
+        continue;
+      }
+      try {
+        next.push(await readImageFile(f));
+      } catch {
+        /* skip unreadable file */
+      }
+    }
+    setAttachments((prev) => [...prev, ...next].slice(0, MAX_ATTACHMENTS));
+  };
+
+  const removeAttachment = (id) =>
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+
+  const onPaste = (e) => {
+    const imageItems = Array.from(e.clipboardData?.items || []).filter((i) =>
+      i.type.startsWith('image/')
+    );
+    if (imageItems.length) {
+      e.preventDefault();
+      addImageFiles(imageItems.map((i) => i.getAsFile()).filter(Boolean));
+    }
+  };
 
   const meta = providerForModel(model);
   const modelLabel = meta?.models.find((m) => m.id === model)?.label;
@@ -203,19 +278,31 @@ export default function AgentPanel() {
   const conversation = useMemo(
     () =>
       messages
-        .filter((m) => m.id !== 'welcome' && !m.error && m.content)
-        .map((m) => ({ role: m.role, content: m.rawContent || m.content })),
+        .filter((m) => m.id !== 'welcome' && !m.error && (m.content || m.images?.length))
+        .map((m) => ({
+          role: m.role,
+          content: m.rawContent || m.content,
+          ...(m.images?.length
+            ? { images: m.images.map((im) => ({ mimeType: im.mimeType, data: im.data })) }
+            : {}),
+        })),
     [messages]
   );
 
   const send = async () => {
     const text = input.trim();
-    if (!text || busy) return;
+    const imgs = attachments;
+    if ((!text && imgs.length === 0) || busy) return;
 
     const provider = providerForModel(model);
     const apiKey = getApiKey(provider?.id);
 
-    const userMsg = { id: `u-${Date.now()}`, role: 'user', content: text };
+    const userMsg = {
+      id: `u-${Date.now()}`,
+      role: 'user',
+      content: text,
+      images: imgs.length ? imgs : undefined,
+    };
     const pendingId = `a-${Date.now()}`;
     setMessages((m) => [
       ...m,
@@ -223,6 +310,7 @@ export default function AgentPanel() {
       { id: pendingId, role: 'assistant', content: '', pending: true, modelLabel },
     ]);
     setInput('');
+    setAttachments([]);
     setBusy(true);
 
     if (!apiKey) {
@@ -248,10 +336,16 @@ export default function AgentPanel() {
     abortRef.current = controller;
 
     try {
-      const system = buildSystemPrompt(filePaths);
+      const system = buildSystemPrompt(flattenFiles(tree));
       const priorMessages = [
         ...conversation,
-        { role: 'user', content: text },
+        {
+          role: 'user',
+          content: text,
+          ...(imgs.length
+            ? { images: imgs.map((im) => ({ mimeType: im.mimeType, data: im.data })) }
+            : {}),
+        },
       ];
       const raw = await callModel({
         providerId: provider.id,
@@ -259,6 +353,7 @@ export default function AgentPanel() {
         apiKey,
         system,
         messages: priorMessages,
+        maxTokens: maxTokensForModel(model),
         signal: controller.signal,
       });
 
@@ -348,18 +443,59 @@ export default function AgentPanel() {
 
       <div className="p-3 border-t border-line shrink-0">
         <div className="rounded-lg border border-line bg-ink-850 focus-within:border-zinc-600 transition-colors">
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-2.5 pt-2.5">
+              {attachments.map((a) => (
+                <div key={a.id} className="relative group">
+                  <img
+                    src={a.url}
+                    alt={a.name}
+                    className="h-14 w-14 object-cover rounded-md border border-line"
+                  />
+                  <button
+                    onClick={() => removeAttachment(a.id)}
+                    title="Remove image"
+                    className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-ink-950 border border-line flex items-center justify-center text-zinc-400 hover:text-rose-400 hover:border-rose-500/40 transition-colors"
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             rows={2}
-            placeholder="Ask the agent to build or edit files…"
+            placeholder="Ask the agent to build or edit files… (paste or attach images)"
             className="w-full resize-none bg-transparent outline-none px-3 py-2.5 text-xs leading-relaxed text-zinc-200 placeholder:text-zinc-600 scrollbar-thin"
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              addImageFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
           <div className="flex items-center justify-between px-2.5 pb-2">
-            <span className="text-2xs text-zinc-600 tracking-tight">
-              {meta?.label} · Enter to send
-            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                title="Attach image"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center justify-center h-6 w-6 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors"
+              >
+                <ImagePlus size={14} />
+              </button>
+              <span className="text-2xs text-zinc-600 tracking-tight">
+                {meta?.label} · Enter to send
+              </span>
+            </div>
             {busy ? (
               <button
                 onClick={stop}
@@ -370,7 +506,7 @@ export default function AgentPanel() {
             ) : (
               <button
                 onClick={send}
-                disabled={!input.trim()}
+                disabled={!input.trim() && attachments.length === 0}
                 className="flex items-center gap-1 h-7 px-2.5 rounded-md bg-zinc-100 text-ink-950 text-2xs font-medium hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200"
               >
                 Send <ArrowUp size={12} />
