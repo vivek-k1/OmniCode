@@ -22,6 +22,12 @@ import {
   Eye,
   EyeOff,
   Boxes,
+  HardDriveDownload,
+  HardDrive,
+  Loader2,
+  Save,
+  Unplug,
+  CircleAlert,
 } from 'lucide-react';
 import { useWorkspace, getApiKey, setApiKey } from '../context/WorkspaceContext.jsx';
 import { PROVIDER_LIST } from '../lib/providers.js';
@@ -251,6 +257,109 @@ function KeysDrawer({ onClose }) {
   );
 }
 
+function SyncBadge({ status }) {
+  const map = {
+    saving: { icon: Loader2, cls: 'text-indigo-300', spin: true, label: 'Saving…' },
+    saved: { icon: Check, cls: 'text-emerald-300', label: 'Saved to disk' },
+    idle: { icon: HardDrive, cls: 'text-zinc-500', label: 'Synced' },
+    error: { icon: CircleAlert, cls: 'text-rose-400', label: 'Sync error' },
+  };
+  const m = map[status] || map.idle;
+  const Icon = m.icon;
+  return (
+    <span className={`flex items-center gap-1 ${m.cls}`}>
+      <Icon size={11} className={m.spin ? 'animate-spin' : ''} />
+      {m.label}
+    </span>
+  );
+}
+
+function FolderBar() {
+  const {
+    fsSupported,
+    dirHandle,
+    dirName,
+    syncStatus,
+    fsError,
+    openLocalFolder,
+    disconnectFolder,
+    saveToDiskNow,
+  } = useWorkspace();
+  const [busy, setBusy] = useState(false);
+
+  const open = async () => {
+    setBusy(true);
+    try {
+      await openLocalFolder();
+    } catch (e) {
+      if (e?.name !== 'AbortError') window.alert(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!fsSupported) return null;
+
+  if (!dirHandle) {
+    return (
+      <button
+        onClick={open}
+        disabled={busy}
+        className="flex items-center gap-2 w-full h-9 px-3 border-b border-line text-2xs text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.02] transition-colors disabled:opacity-50"
+      >
+        {busy ? (
+          <Loader2 size={12} className="animate-spin" />
+        ) : (
+          <HardDriveDownload size={12} />
+        )}
+        Open local folder…
+      </button>
+    );
+  }
+
+  return (
+    <div className="border-b border-line">
+      <div className="flex items-center justify-between h-9 px-3">
+        <span className="flex items-center gap-1.5 text-2xs text-zinc-300 truncate">
+          <HardDrive size={12} className="text-accent-emerald shrink-0" />
+          <span className="truncate font-mono tracking-tight">{dirName}</span>
+        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            title="Save all to disk now"
+            onClick={() => saveToDiskNow()}
+            className="p-1 rounded text-zinc-500 hover:text-emerald-300 hover:bg-white/[0.04] transition-colors"
+          >
+            <Save size={13} />
+          </button>
+          <button
+            title="Open a different folder"
+            onClick={open}
+            className="p-1 rounded text-zinc-500 hover:text-indigo-300 hover:bg-white/[0.04] transition-colors"
+          >
+            <HardDriveDownload size={13} />
+          </button>
+          <button
+            title="Disconnect folder"
+            onClick={() => disconnectFolder()}
+            className="p-1 rounded text-zinc-500 hover:text-rose-400 hover:bg-white/[0.04] transition-colors"
+          >
+            <Unplug size={13} />
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center justify-between px-3 pb-1.5 text-[10px]">
+        <SyncBadge status={syncStatus} />
+        {syncStatus === 'error' && fsError && (
+          <span className="text-rose-400/80 truncate max-w-[140px]" title={fsError}>
+            {fsError}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Sidebar() {
   const { tree, upsertFile, createFolder, stats } = useWorkspace();
   const [keysOpen, setKeysOpen] = useState(false);
@@ -287,6 +396,8 @@ export default function Sidebar() {
           </button>
         </div>
       </div>
+
+      <FolderBar />
 
       <div className="flex-1 overflow-y-auto scrollbar-thin py-1">
         {tree.length === 0 ? (

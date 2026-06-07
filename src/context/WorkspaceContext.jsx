@@ -26,6 +26,17 @@ import {
 import { applyLLMOutput } from '../lib/parser.js';
 import { bundle } from '../lib/bundler.js';
 import {
+  fsSupported,
+  pickDirectory,
+  readDirectoryToTree,
+  ensurePermission,
+  syncTreeToDir,
+  deletePathFromDir,
+  saveHandle,
+  loadHandle,
+  clearHandle,
+} from '../lib/fileSystem.js';
+import {
   PROVIDERS,
   DEFAULT_PROVIDER,
   DEFAULT_MODEL,
@@ -165,6 +176,18 @@ function reducer(state, action) {
     case 'BUMP_PREVIEW':
       return { ...state, previewNonce: state.previewNonce + 1 };
 
+    case 'SET_DIR':
+      return {
+        ...state,
+        dirHandle: action.handle,
+        dirName: action.name || null,
+        syncStatus: action.handle ? 'idle' : 'off',
+        fsError: null,
+      };
+
+    case 'SET_SYNC':
+      return { ...state, syncStatus: action.status, fsError: action.error ?? null };
+
     default:
       return state;
   }
@@ -185,6 +208,11 @@ function init() {
     provider,
     model,
     previewNonce: 0,
+    // Local folder sync (File System Access API)
+    dirHandle: null,
+    dirName: null,
+    syncStatus: 'off', // 'off' | 'idle' | 'saving' | 'saved' | 'error'
+    fsError: null,
   };
 }
 
@@ -195,6 +223,13 @@ function init() {
 export function WorkspaceProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, undefined, init);
   const debounceRef = useRef(null);
+  const syncRef = useRef(null);
+  const dirHandleRef = useRef(null);
+  // Skip the very first disk-sync triggered by importing a folder.
+  const skipNextSync = useRef(false);
+
+  // Keep a ref to the handle for use inside non-reactive callbacks.
+  dirHandleRef.current = state.dirHandle;
 
   // Persist tree (debounced) + model selection.
   useEffect(() => {
@@ -217,6 +252,58 @@ export function WorkspaceProvider({ children }) {
       /* ignore */
     }
   }, [state.model, state.provider]);
+
+  // Auto-persist the tree to the connected local folder (debounced).
+  useEffect(() => {
+    if (!state.dirHandle) return undefined;
+    if (skipNextSync.current) {
+      skipNextSync.current = false;
+      return undefined;
+    }
+    clearTimeout(syncRef.current);
+    syncRef.current = setTimeout(async () => {
+      dispatch({ type: 'SET_SYNC', status: 'saving' });
+      try {
+        const ok = await ensurePermission(state.dirHandle);
+        if (!ok) throw new Error('Write permission denied for the folder.');
+        const { errors } = await syncTreeToDir(state.dirHandle, state.tree);
+        if (errors.length) {
+          dispatch({ type: 'SET_SYNC', status: 'error', error: errors[0] });
+        } else {
+          dispatch({ type: 'SET_SYNC', status: 'saved' });
+        }
+      } catch (e) {
+        dispatch({ type: 'SET_SYNC', status: 'error', error: e.message || String(e) });
+      }
+    }, 700);
+    return () => clearTimeout(syncRef.current);
+  }, [state.tree, state.dirHandle]);
+
+  // Attempt to silently reconnect a previously opened folder on load.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!fsSupported()) return;
+      const handle = await loadHandle();
+      if (!handle || cancelled) return;
+      try {
+        const granted =
+          (await handle.queryPermission({ mode: 'readwrite' })) === 'granted';
+        // Don't auto-prompt; only reconnect if permission already persists.
+        if (granted && !cancelled) {
+          const { tree } = await readDirectoryToTree(handle);
+          skipNextSync.current = true;
+          dispatch({ type: 'SET_TREE', tree });
+          dispatch({ type: 'SET_DIR', handle, name: handle.name });
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Capture console/error messages forwarded from the sandbox iframe.
   useEffect(() => {
@@ -289,7 +376,16 @@ export function WorkspaceProvider({ children }) {
       writeActive: (content) => dispatch({ type: 'WRITE_ACTIVE', content }),
       upsertFile: (path, content) => dispatch({ type: 'UPSERT_FILE', path, content }),
       createFolder: (path) => dispatch({ type: 'CREATE_FOLDER', path }),
-      deleteNode: (path) => dispatch({ type: 'DELETE_NODE', path }),
+      deleteNode: (path) => {
+        dispatch({ type: 'DELETE_NODE', path });
+        // Mirror the deletion to disk if a folder is connected.
+        const handle = dirHandleRef.current;
+        if (handle) {
+          deletePathFromDir(handle, path).catch(() => {
+            /* file may not exist on disk yet */
+          });
+        }
+      },
       renameNode: (path, newName) => dispatch({ type: 'RENAME_NODE', path, newName }),
       readFile: (path) => readFile(state.tree, path),
       clearLogs: () => dispatch({ type: 'CLEAR_LOGS' }),
@@ -298,6 +394,43 @@ export function WorkspaceProvider({ children }) {
       setModel: (model) => dispatch({ type: 'SET_MODEL', model }),
       refreshPreview: () => dispatch({ type: 'BUMP_PREVIEW' }),
       setTree: (tree) => dispatch({ type: 'SET_TREE', tree }),
+
+      // ---- Local folder (File System Access API) ----
+      fsSupported: fsSupported(),
+      openLocalFolder: async () => {
+        const handle = await pickDirectory(); // throws on cancel/unsupported
+        const { tree, skipped } = await readDirectoryToTree(handle);
+        skipNextSync.current = true; // don't immediately rewrite what we read
+        dispatch({ type: 'SET_TREE', tree });
+        dispatch({ type: 'SET_DIR', handle, name: handle.name });
+        await saveHandle(handle);
+        const firstFile = listFilePaths(tree)[0];
+        if (firstFile) dispatch({ type: 'OPEN_FILE', path: firstFile });
+        return { name: handle.name, skipped };
+      },
+      disconnectFolder: async () => {
+        await clearHandle();
+        dispatch({ type: 'SET_DIR', handle: null });
+      },
+      saveToDiskNow: async () => {
+        const handle = dirHandleRef.current;
+        if (!handle) return { written: 0, errors: ['No folder connected'] };
+        dispatch({ type: 'SET_SYNC', status: 'saving' });
+        try {
+          const ok = await ensurePermission(handle);
+          if (!ok) throw new Error('Write permission denied.');
+          const res = await syncTreeToDir(handle, state.tree);
+          dispatch({
+            type: 'SET_SYNC',
+            status: res.errors.length ? 'error' : 'saved',
+            error: res.errors[0],
+          });
+          return res;
+        } catch (e) {
+          dispatch({ type: 'SET_SYNC', status: 'error', error: e.message });
+          return { written: 0, errors: [e.message] };
+        }
+      },
       // Apply raw LLM output to the tree; returns the written paths.
       applyAgentOutput: (raw) => {
         const result = applyLLMOutput(state.tree, raw);
