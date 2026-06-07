@@ -29,7 +29,7 @@ jobs:
 
       - run: npm run build
         env:
-          BASE_PATH: /BYOK/
+          BASE_PATH: /OmniCode/
 
       - uses: actions/upload-pages-artifact@v3
         with:

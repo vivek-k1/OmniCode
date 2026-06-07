@@ -1,6 +1,6 @@
-# BYOK · AI Coding Workspace & Web Sandbox
+# OmniCode · AI Coding Workspace & Web Sandbox
 
-A premium, "Bring Your Own Key" web IDE and AI coding agent — a Cursor / Bolt.new-style
+A premium, bring-your-own-key web IDE and AI coding agent — a Cursor / Bolt.new-style
 sandbox that runs entirely in the browser. Generate nested React projects with an AI
 agent, edit them in a tabbed editor, and run them live in an isolated iframe with full
 console + error interception.

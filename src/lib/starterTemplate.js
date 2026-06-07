@@ -43,7 +43,7 @@ export default function App() {
   console.log('App mounted');
   return (
     <main className="app">
-      <h1>BYOK Sandbox</h1>
+      <h1>OmniCode</h1>
       <p>Edit files on the left or ask the agent to build something.</p>
       <Counter />
     </main>

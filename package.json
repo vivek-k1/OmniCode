@@ -1,9 +1,9 @@
 {
-  "name": "byok-workspace",
+  "name": "omnicode",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Premium multi-model BYOK AI coding workspace & web sandbox",
+  "description": "OmniCode — premium multi-model AI coding workspace & web sandbox",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

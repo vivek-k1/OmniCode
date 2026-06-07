@@ -48,7 +48,7 @@ function TopBar({ view, setView }) {
         <div className="flex items-center gap-2">
           <Boxes size={17} className="text-accent-emerald" />
           <span className="text-sm font-semibold tracking-tight text-zinc-100">
-            BYOK
+            OmniCode
           </span>
           <span className="text-2xs text-zinc-600 tracking-[0.18em] uppercase mt-0.5">
             Workspace

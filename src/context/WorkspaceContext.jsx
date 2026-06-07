@@ -203,7 +203,7 @@ function init() {
     logs: [],
     problems: [],
     terminal: [
-      { type: 'system', text: 'BYOK sandbox terminal · type `help` for commands' },
+      { type: 'system', text: 'OmniCode terminal · type `help` for commands' },
     ],
     provider,
     model,
